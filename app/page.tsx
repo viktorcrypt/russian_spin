@@ -2,68 +2,19 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { motion, useAnimation } from "framer-motion";
-import { Skull, Target, RotateCw, Zap } from "lucide-react";
+import { Skull, Target, RotateCw, Zap, X } from "lucide-react";
+import { usePrivy } from "@privy-io/react-auth";
+import AuthComponent from "@/components/Auth";
 
-import {
-  WagmiProvider,
-  createConfig,
-  http,
-  useAccount,
-  useConnect,
-  useDisconnect,
-  useWriteContract,
-} from "wagmi";
-import { injected } from "wagmi/connectors";
-import { defineChain } from "viem";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+const CONTRACT_ADDRESS =
+  (process.env.NEXT_PUBLIC_CONTRACT_ADDRESS as `0x${string}`) ||
+  ("0x336cc67C7A141d6d1711830EaDDC2147d3a33191" as const);
 
-// ── Chain: Monad Testnet ──────────────────────────────────────────────────────
-const monadTestnet = defineChain({
-  id: 10143,
-  name: "Monad Testnet",
-  nativeCurrency: { name: "Monad", symbol: "MON", decimals: 18 },
-  rpcUrls: {
-    default: { http: ["https://testnet-rpc.monad.xyz"] },
-    public: { http: ["https://testnet-rpc.monad.xyz"] },
-  },
-});
+// 👉 ссылка на лидерборд MGID
+const LEADERBOARD_URL =
+  "https://monad-games-id-site.vercel.app/leaderboard?page=1&gameId=240&sortBy=scores";
 
-const config = createConfig({
-  chains: [monadTestnet],
-  transports: { [monadTestnet.id]: http("https://testnet-rpc.monad.xyz") },
-  connectors: [injected()],
-});
-
-// ── Contract ──────────────────────────────────────────────────────────────────
-const CONTRACT_ADDRESS = "0x336cc67C7A141d6d1711830EaDDC2147d3a33191" as const;
-const RUSSIAN_SPIN_ABI = [
-  { type: "function", name: "start", stateMutability: "nonpayable", inputs: [], outputs: [] },
-  { type: "function", name: "spin", stateMutability: "nonpayable", inputs: [], outputs: [] },
-  { type: "function", name: "cashOut", stateMutability: "nonpayable", inputs: [], outputs: [] },
-  {
-    type: "function",
-    name: "getSession",
-    stateMutability: "view",
-    inputs: [{ name: "player", type: "address" }],
-    outputs: [
-      { name: "level", type: "uint8" },
-      { name: "alive", type: "bool" },
-      { name: "nonce", type: "uint64" },
-      { name: "points", type: "uint256" },
-    ],
-  },
-] as const;
-
-// ── Placeholder: submit score to Monad Game ID ────────────────────────────────
-async function submitScoreToGameID(score: number, opts?: { address?: string }) {
-  try {
-    console.log("[GameID] submit score:", score, opts?.address);
-  } catch (e) {
-    console.error("[GameID] score submit failed:", e);
-  }
-}
-
-// ── Tiny UI (no Tailwind) ─────────────────────────────────────────────────────
+// ── helpers ───────────────────────────────────────────────────────────────────
 function Button({
   variant = "primary",
   disabled,
@@ -95,13 +46,19 @@ function Card({ children }: { children: React.ReactNode }) {
   return <div className="card">{children}</div>;
 }
 
-// ── Revolver (SVG + Framer Motion) ────────────────────────────────────────────
+function randBullets(count: number): number[] {
+  const set = new Set<number>();
+  while (set.size < count) set.add(Math.floor(Math.random() * 6));
+  return Array.from(set).sort((a, b) => a - b);
+}
+
+// ── Revolver ──────────────────────────────────────────────────────────────────
 function Revolver({
-  bullets,
+  bulletPositions,
   lastRoll,
   spinning,
 }: {
-  bullets: number;
+  bulletPositions: number[];
   lastRoll: number | null;
   spinning: boolean;
 }) {
@@ -130,11 +87,11 @@ function Revolver({
           </radialGradient>
         </defs>
         <circle cx="100" cy="100" r="90" fill="url(#metal)" stroke="#111827" strokeWidth="6" />
-        {Array.from({ length: 6 }).map((_, i) => {
-          const angle = (i / 6) * Math.PI * 2;
+        {Array.from({ length: chambers }).map((_, i) => {
+          const angle = (i / chambers) * Math.PI * 2;
           const cx = 100 + Math.cos(angle) * 55;
           const cy = 100 + Math.sin(angle) * 55;
-          const isBullet = i < bullets;
+          const isBullet = bulletPositions.includes(i);
           const isPointer = lastRoll !== null && lastRoll === i;
           return (
             <g key={i}>
@@ -149,91 +106,96 @@ function Revolver({
   );
 }
 
-// ── Game Screen ───────────────────────────────────────────────────────────────
-function GameScreen() {
-  const { connect, connectors } = useConnect();
-  const { address, isConnected } = useAccount();
-  const { disconnect } = useDisconnect();
-  const { writeContract, isPending } = useWriteContract();
+// ── Game ──────────────────────────────────────────────────────────────────────
+export default function Page() {
+  const { ready, authenticated } = usePrivy();
 
-  const [demoMode, setDemoMode] = useState(true);
+  const [mgidAddr, setMgidAddr] = useState<string>("");
   const [level, setLevel] = useState<number>(0);
   const [points, setPoints] = useState<number>(0);
   const [alive, setAlive] = useState<boolean>(false);
+
+  const [bulletPositions, setBulletPositions] = useState<number[]>([]);
   const [lastRoll, setLastRoll] = useState<number | null>(null);
   const [spinning, setSpinning] = useState(false);
+  const [pending, setPending] = useState(false);
 
-  const bullets = useMemo(() => (level <= 0 ? 0 : Math.min(level, 5)), [level]);
-  const canWrite = isConnected && !demoMode;
-  const isDead = !alive && level > 0 && points === 0;
+  const [showModal, setShowModal] = useState(false);
+  const [modalScore, setModalScore] = useState<number>(0);
+  const [modalTx, setModalTx] = useState<string | null>(null);
+
+  const handleUserChange = (u: any) => setMgidAddr(u?.address || "");
+  const riskText = useMemo(() => `${bulletPositions.length}/6`, [bulletPositions]);
 
   const start = async () => {
-    setLastRoll(null);
-    if (canWrite) {
-      await writeContract({
-        abi: RUSSIAN_SPIN_ABI,
-        address: CONTRACT_ADDRESS,
-        functionName: "start",
-        chainId: monadTestnet.id,
-      });
+    if (!ready || !authenticated) {
+      alert("Sign in with Monad Games ID first.");
+      return;
     }
+    setLastRoll(null);
     setLevel(1);
     setPoints(10);
     setAlive(true);
+    setBulletPositions(randBullets(1));
   };
 
   const spin = async () => {
-    if (!alive || spinning) return;            // ⛔️ блокируем повторный спин
+    if (!alive) return;
     setSpinning(true);
 
     const roll = Math.floor(Math.random() * 6);
-    const bulletsBefore = bullets;             // 🎯 фиксируем риск на момент клика
 
-    try {
-      if (canWrite) {
-        await writeContract({
-          abi: RUSSIAN_SPIN_ABI,
-          address: CONTRACT_ADDRESS,
-          functionName: "spin",
-          chainId: monadTestnet.id,
-        });
+    setTimeout(() => {
+      setSpinning(false);
+      setLastRoll(roll);
+
+      const dead = bulletPositions.includes(roll);
+      if (dead) {
+        setAlive(false);
+        setPoints(0);
+        return;
       }
-    } finally {
-      setTimeout(() => {
-        setSpinning(false);
-        setLastRoll(roll);
-        const die = roll < bulletsBefore;      // считаем по зафиксированным bullets
-        if (die) {
-          setAlive(false);
-          setPoints(0);
-        } else {
-          setPoints((p) => p * 10);
-          setLevel((l) => l + 1);
-        }
-      }, 820);
-    }
+
+      setPoints((p) => p * 10);
+      setLevel((l) => {
+        const nextLevel = l + 1;
+        const nextCount = Math.min(nextLevel, 5);
+        setBulletPositions(randBullets(nextCount));
+        return nextLevel;
+      });
+    }, 820);
   };
 
   const cashOut = async () => {
     if (!alive || points <= 10) return;
-
-    const finalScore = points;
-
-    if (canWrite) {
-      await writeContract({
-        abi: RUSSIAN_SPIN_ABI,
-        address: CONTRACT_ADDRESS,
-        functionName: "cashOut",
-        chainId: monadTestnet.id,
-      });
+    if (!mgidAddr) {
+      alert("Sign in with Monad Games ID first.");
+      return;
     }
 
-    setAlive(false);
-
+    const finalScore = points;
+    setPending(true);
     try {
-      await submitScoreToGameID(finalScore, { address });
-    } catch (e) {
-      console.error("submitScoreToGameID error:", e);
+      const res = await fetch("/api/submit-onchain", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          player: mgidAddr,
+          score: finalScore,
+          game: CONTRACT_ADDRESS,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) throw new Error(data?.error || "submit failed");
+
+      setAlive(false);
+      setModalScore(finalScore);
+      setModalTx(typeof data?.tx === "string" ? data.tx : null);
+      setShowModal(true);
+    } catch (e: any) {
+      alert(e?.message || e);
+    } finally {
+      setPending(false);
     }
   };
 
@@ -244,28 +206,21 @@ function GameScreen() {
           <span className="muted">Monad</span> <span className="blood">Russian Spin</span>
         </h1>
         <div className="tools">
-          <label className="checkbox">
-            <input type="checkbox" checked={demoMode} onChange={(e) => setDemoMode(e.target.checked)} /> Demo mode
-          </label>
-          {isConnected ? (
-            <Button variant="ghost" onClick={() => disconnect()}>Disconnect</Button>
-          ) : (
-            <Button variant="ghost" onClick={() => connect({ connector: connectors[0] })}>Connect</Button>
-          )}
+          <AuthComponent onUserChange={handleUserChange} />
         </div>
       </header>
 
       <div className="grid">
         <Card>
           <div className="meta">
-            <div>Risk: <b>{bullets}/6</b></div>
+            <div>Risk: <b>{riskText}</b></div>
             <div>Level: <b>{level || "-"}</b></div>
           </div>
-          <Revolver bullets={bullets} lastRoll={lastRoll} spinning={spinning} />
+          <Revolver bulletPositions={bulletPositions} lastRoll={lastRoll} spinning={spinning} />
           <div className="actions">
-            <Button onClick={start} disabled={isPending}><RotateCw className="ico" /> Start</Button>
-            <Button onClick={spin} disabled={!alive || isPending || spinning}><Target className="ico" /> {isPending ? "..." : "Spin"}</Button>
-            <Button variant="warning" onClick={cashOut} disabled={!alive || points <= 10 || isPending}><Zap className="ico" /> Cash Out</Button>
+            <Button onClick={start} disabled={pending}><RotateCw className="ico" /> Start</Button>
+            <Button onClick={spin} disabled={!alive || pending}><Target className="ico" /> {pending ? "..." : "Spin"}</Button>
+            <Button variant="warning" onClick={cashOut} disabled={!alive || points <= 10 || pending}><Zap className="ico" /> Cash Out</Button>
           </div>
         </Card>
 
@@ -285,48 +240,137 @@ function GameScreen() {
             <li>Bullets = min(level, 5)</li>
             <li>Die if roll &lt; bullets</li>
           </ul>
+
+          {/* 👉 Кнопка-ссылка на глобальный лидерборд */}
+          <div style={{ marginTop: 14 }}>
+            <a
+              href={LEADERBOARD_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn btn-ghost"
+              style={{ textDecoration: "none" }}
+            >
+              🌐 Global Leaderboard
+            </a>
+          </div>
         </Card>
       </div>
 
       <footer className="foot">
-        Contract: <code>{CONTRACT_ADDRESS}</code> · Chain ID 10143 (Monad Testnet)
+        Contract: <code>{CONTRACT_ADDRESS}</code> · Chain: Monad Testnet (10143)
       </footer>
 
-      {/* Big death overlay */}
-      {isDead && (
+      {/* Death overlay */}
+      {!alive && level > 0 && points === 0 && (
         <motion.div
-          className="death-overlay"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: 0.25 }}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,.7)",
+            display: "grid",
+            placeItems: "center",
+            zIndex: 60,
+          }}
         >
           <motion.div
-            className="death-banner"
             initial={{ scale: 0.9 }}
             animate={{ scale: 1 }}
             transition={{ type: "spring", stiffness: 260, damping: 18 }}
+            style={{
+              fontWeight: 800,
+              letterSpacing: 2,
+              color: "#fca5a5",
+              textShadow: "0 0 22px rgba(239, 68, 68, .5)",
+              fontSize: "clamp(32px, 8vw, 84px)",
+            }}
           >
-            BANG! YOU DIED
+            YOU ARE DEAD
           </motion.div>
-
-          <div className="death-sub">Your score has been reset to 0</div>
-
-          <div className="death-actions">
-            <Button onClick={start}><RotateCw className="ico" /> Restart</Button>
+          <div style={{ marginTop: 12, color: "#ddd" }}>Your score has been reset to 0</div>
+          <div style={{ marginTop: 18 }}>
+            <Button onClick={() => start()}><RotateCw className="ico" /> Restart</Button>
           </div>
         </motion.div>
       )}
-    </div>
-  );
-}
 
-export default function Page() {
-  const [queryClient] = useState(() => new QueryClient());
-  return (
-    <QueryClientProvider client={queryClient}>
-      <WagmiProvider config={config}>
-        <GameScreen />
-      </WagmiProvider>
-    </QueryClientProvider>
+      {/* CashOut success modal */}
+      {showModal && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,.55)",
+            display: "grid",
+            placeItems: "center",
+            zIndex: 80,
+          }}
+          onClick={() => setShowModal(false)}
+        >
+          <div
+            className="card"
+            style={{
+              position: "relative",
+              width: "min(92vw, 520px)",
+              padding: "22px 22px 18px",
+              cursor: "default",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              aria-label="Close"
+              onClick={() => setShowModal(false)}
+              style={{
+                position: "absolute",
+                top: 10,
+                right: 10,
+                background: "transparent",
+                border: "none",
+                color: "#aaa",
+                cursor: "pointer",
+              }}
+            >
+              <X size={20} />
+            </button>
+
+            <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 6 }}>Score submitted!</div>
+            <div style={{ opacity: 0.9, marginBottom: 14 }}>
+              Your score <b>{modalScore.toLocaleString()}</b> has been sent to the{" "}
+              <b>Monad Games ID</b> leaderboard.
+            </div>
+            {modalTx && (
+              <div
+                style={{
+                  background: "rgba(255,255,255,.04)",
+                  border: "1px solid rgba(255,255,255,.08)",
+                  padding: "10px",
+                  borderRadius: 8,
+                  wordBreak: "break-all",
+                  marginBottom: 14,
+                  fontSize: 13,
+                }}
+              >
+                tx: {modalTx.slice(0, 10)}…{modalTx.slice(-8)}
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <a
+                href={LEADERBOARD_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn btn-primary"
+                style={{ textDecoration: "none" }}
+              >
+                View Leaderboard
+              </a>
+              <Button variant="ghost" onClick={() => setShowModal(false)}>OK</Button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
