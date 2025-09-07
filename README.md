@@ -20,7 +20,7 @@ You start with **10 points**. Each spin of the revolver is a gamble:
 
 ## 📜 Smart Contract
 - Deployed on **Monad Testnet**  
-- Address: `0x336cc67C7A141d6d1711830EaDDC2147d3a33191`
+- Address:`0x336cc67C7A141d6d1711830EaDDC2147d3a33191`
 
 ---
 
